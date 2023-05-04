@@ -1,3 +1,36 @@
+dde-app-services (1.0.20) unstable; urgency=medium
+
+  * 1.0.20
+
+ --  Deepin Package Builder <packages@deepin.com>  Mon, 10 Apr 2023 14:13:40 +0800
+
+dde-app-services (0.0.23) unstable; urgency=medium
+
+  * feat: Remove root user for dde-dconfig-daemon
+  * fix: Save cache invalided
+  * fix: Manual clean resource When exit
+  * fix: Reduce delay sync time
+
+ --  Deepin Package Builder <packages@deepin.com>  Thu, 30 Mar 2023 15:37:02 +0800
+
+dde-app-services (0.0.22) unstable; urgency=medium
+
+  * master 0.0.22
+
+ --  Deepin Package Builder <packages@deepin.com>  Wed, 01 Mar 2023 10:06:35 +0800
+
+dde-app-services (0.0.21) unstable; urgency=medium
+
+  * Support generic configuration
+
+ --  Deepin Package Builder <yeshanshan@uniontech.com>  Wed, 22 Feb 2023 14:43:34 +0800
+
+dde-app-services (0.0.20) unstable; urgency=medium
+
+  * Release 0.0.20
+
+ --  Deepin Package Builder <yeshanshan@uniontech.com>  Thu, 24 Nov 2022 13:39:03 +0800
+
 dde-app-services (0.0.1) unstable; urgency=medium
 
   * Initial release Tag 0.0.1

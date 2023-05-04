@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021 - 2022 Uniontech Software Technology Co.,Ltd.
+// SPDX-FileCopyrightText: 2021 - 2023 Uniontech Software Technology Co.,Ltd.
 //
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
@@ -11,21 +11,66 @@
 #include <QRegularExpression>
 #include <DStandardPaths>
 #include <QLoggingCategory>
+#include "helper.hpp"
 
 Q_DECLARE_LOGGING_CATEGORY(cfLog);
 
+// /appid/filename/subpath/userid
 using ConnKey = QString;
+// /appid/filename/subpath
 using ResourceKey = QString;
+// /filename/subpath
+using GenericResourceKey = QString;
 using ConnServiceName = QString;
 using ConnRefCount = int;
+// user: u-${ConnKey}, global: g-${ResourceKey}
+using ConfigCacheKey = QString;
+static constexpr int TestUid = 0U;
+static const QString VirtualInterAppId = "_";
 
-inline QString getResourceKey(const ConnKey &connKey)
+inline QString formatDBusObjectPath(QString path)
+{
+    return path.replace('.', '_').replace('-', '_');
+}
+inline QString outerAppidToInner(const QString &appid)
+{
+    return appid == NoAppId ? VirtualInterAppId : appid;
+}
+inline QString innerAppidToOuter(const QString &appid)
+{
+    return appid == VirtualInterAppId ? NoAppId : appid;
+}
+inline bool isGenericResourceConn(const ConnKey &connKey)
+{
+    return connKey.startsWith("/" + VirtualInterAppId);
+}
+inline ResourceKey getResourceKey(const QString &appid, const GenericResourceKey &key)
+{
+    return QString("/%1%2").arg(appid).arg(key);
+}
+inline ResourceKey getResourceKey(const ConnKey &connKey)
 {
     return connKey.left(connKey.lastIndexOf('/'));
+}
+inline GenericResourceKey getGenericResourceKeyByResourceKey(const ResourceKey &resourceKey)
+{
+    return resourceKey.mid(resourceKey.indexOf('/', 1));
+}
+inline GenericResourceKey getGenericResourceKey(const QString &name, const QString &subpath)
+{
+    return QString("/%1%2").arg(name, subpath);
+}
+inline GenericResourceKey getGenericResourceKey(const ConnKey &connKey)
+{
+    return getGenericResourceKeyByResourceKey(getResourceKey(connKey));
 }
 inline uint getConnectionKey(const ConnKey &connKey)
 {
     return connKey.mid(connKey.lastIndexOf('/') + 1).toUInt();
+}
+inline ConnKey getConnectionKey(const ResourceKey &key, const uint uid)
+{
+    return QString("%1/%2").arg(key).arg(uid);
 }
 
 struct ConfigureId {
@@ -50,7 +95,7 @@ inline ConfigureId getMetaConfigureId(const QString &path)
 {
     ConfigureId info;
     // /usr/share/dsg/configs/[$appid]/[$subpath]/$resource.json
-    static QRegularExpression usrReg(R"(^/usr/share/dsg/configs/(?<appid>([a-z0-9\s\-_\@\-\^!#$%&]+\/)?)(?<subpath>([a-z0-9\s\-_\@\-\^!#$%&]+\/)*)(?<resource>[a-z0-9\s\-_\@\-\^!#$%&]+).json$)");
+    static QRegularExpression usrReg(R"(/configs/(?<appid>([a-z0-9\s\-_\@\-\^!#$%&.]+\/)?)(?<subpath>([a-z0-9\s\-_\@\-\^!#$%&.]+\/)*)(?<resource>[a-z0-9\s\-_\@\-\^!#$%&.]+).json$)");
 
     QRegularExpressionMatch match;
     match = usrReg.match(path);
@@ -68,10 +113,10 @@ inline ConfigureId getOverrideConfigureId(const QString &path)
 {
     ConfigureId info;
     // /usr/share/dsg/configs/overrides/[$appid]/$resource/[$subpath]/$override_id.json
-    static QRegularExpression usrReg(R"(^/usr/share/dsg/configs/overrides/(?<appid>([a-z0-9\s\-_\@\-\^!#$%&]+\/)?)(?<resource>[a-z0-9\s\-_\@\-\^!#$%&]+)/(?<subpath>([a-z0-9\s\-_\@\-\^!#$%&]+\/)*)(?<configurationid>[a-z0-9\s\-_\@\-\^!#$%&]+).json$)");
+    static QRegularExpression usrReg(R"(/configs/overrides/(?<appid>([a-z0-9\s\-_\@\-\^!#$%&.]+\/)?)(?<resource>[a-z0-9\s\-_\@\-\^!#$%&.]+)/(?<subpath>([a-z0-9\s\-_\@\-\^!#$%&.]+\/)*)(?<configurationid>[a-z0-9\s\-_\@\-\^!#$%&.]+).json$)");
 
     // /etc/dsg/configs/overrides/[$appid]/$resource/[$subpath]/$override_id.json
-    static QRegularExpression etcReg(R"(^/etc/dsg/configs/overrides/(?<appid>([a-z0-9\s\-_\@\-\^!#$%&]+\/)?)(?<resource>[a-z0-9\s\-_\@\-\^!#$%&]+)/(?<subpath>([a-z0-9\s\-_\@\-\^!#$%&]+\/)*)(?<configurationid>[a-z0-9\s\-_\@\-\^!#$%&]+).json$)");
+    static QRegularExpression etcReg(R"(^/etc/dsg/configs/overrides/(?<appid>([a-z0-9\s\-_\@\-\^!#$%&.]+\/)?)(?<resource>[a-z0-9\s\-_\@\-\^!#$%&.]+)/(?<subpath>([a-z0-9\s\-_\@\-\^!#$%&.]+\/)*)(?<configurationid>[a-z0-9\s\-_\@\-\^!#$%&.]+).json$)");
 
     QRegularExpressionMatch match;
     match = usrReg.match(path);
@@ -94,8 +139,7 @@ public:
     typedef T* DataType;
     ~ObjectPool()
     {
-        qDeleteAll(m_pool);
-        m_pool.clear();
+        clear();
     }
     using InitFunc = std::function<void(DataType)>;
     void setInitFunc(InitFunc func) { m_initFunc = func;}
@@ -112,6 +156,12 @@ public:
         return m_pool.dequeue();
     }
     void push(DataType item) { m_pool.enqueue(item);}
+
+    void clear()
+    {
+        qDeleteAll(m_pool);
+        m_pool.clear();
+    }
 
 private:
     QQueue<DataType> m_pool;

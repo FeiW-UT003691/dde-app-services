@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021 - 2022 Uniontech Software Technology Co.,Ltd.
+// SPDX-FileCopyrightText: 2021 - 2023 Uniontech Software Technology Co.,Ltd.
 //
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
@@ -34,23 +34,26 @@ DSGConfigServer::DSGConfigServer(QObject *parent)
     :QObject (parent),
       m_watcher(nullptr),
       m_refManager(new RefManager(this))
+    , m_syncRequestCache(new ConfigSyncRequestCache(this))
 {
     connect(this, &DSGConfigServer::releaseResource, this, &DSGConfigServer::onReleaseResource);
     connect(m_refManager, &RefManager::releaseResource, this, &DSGConfigServer::releaseResource);
     connect(this, &DSGConfigServer::tryExit, this, &DSGConfigServer::onTryExit);
+    connect(m_syncRequestCache, &ConfigSyncRequestCache::syncConfigRequest, this, &DSGConfigServer::doSyncConfigCache);
 }
 
 DSGConfigServer::~DSGConfigServer()
 {
+    qInfo() << "Destory DSGConfigServer and try to release resources.";
     exit();
 }
 
 void DSGConfigServer::exit()
 {
-    qInfo() << "dconfig server exit and release resources.";
+    m_refManager->destroy();
     qDeleteAll(m_resources);
     m_resources.clear();
-    m_refManager->destroy();
+    m_syncRequestCache->clear();
 }
 
 /*
@@ -82,9 +85,9 @@ bool DSGConfigServer::registerService()
  \a key 连接对象的唯一ID
  \return
  */
-DSGConfigResource *DSGConfigServer::resourceObject(const ConnKey &key)
+DSGConfigResource *DSGConfigServer::resourceObject(const GenericResourceKey &key) const
 {
-    return m_resources.value(key, nullptr);
+    return m_resources.value(key);
 }
 
 /*!
@@ -126,48 +129,53 @@ int DSGConfigServer::resourceSize() const
 QDBusObjectPath DSGConfigServer::acquireManager(const QString &appid, const QString &name, const QString &subpath)
 {
     const auto &service = calledFromDBus() ? message().service() : "test.service";
-    const uint &uid = calledFromDBus() ? connection().interface()->serviceUid(service).value() : 0U;
-    qCDebug(cfLog, "acquireManager service:%s, uid:%d", qPrintable(service), uid);
-    QString path = validDBusObjectPath(QString("/%1/%2%3").arg(appid, name, subpath));
-    auto resource = resourceObject(path);
+    const uint &uid = calledFromDBus() ? connection().interface()->serviceUid(service).value() : TestUid;
+    qCDebug(cfLog, "AcquireManager service:%s, uid:%d, appid:%s", qPrintable(service), uid, qPrintable(appid));
+    const QString &innerAppid = outerAppidToInner(appid);
+    const GenericResourceKey &genericResourceKey = getGenericResourceKey(name, subpath);
+    DSGConfigResource *resource = resourceObject(genericResourceKey);
+    QScopedPointer<DSGConfigResource> resourceHolder;
     if (!resource) {
-        resource = new DSGConfigResource(path, m_localPrefix);
-        bool loadStatus = resource->load(appid, name, subpath);
-        if (loadStatus) {
-            m_resources.insert(path, resource);
-            QObject::connect(resource, &DSGConfigResource::releaseConn, this, &DSGConfigServer::onReleaseChanged);
-            qInfo() << "created resource:" << path;
-        } else {
-            //error
-            QString errorMsg = QString("Can't load resource. expecting path:%1.").arg(path);
-            if (calledFromDBus())
-                sendErrorReply(QDBusError::Failed, errorMsg);
+        resource = new DSGConfigResource(name, subpath, m_localPrefix);
+        resource->setSyncRequestCache(m_syncRequestCache);
+        resourceHolder.reset(resource);
+    }
+    bool loadStatus = resource->load(innerAppid);
+    if (!loadStatus) {
+        //error
+        QString errorMsg = QString("Can't load resource: %1, for the appid:[%2].").arg(genericResourceKey).arg(appid);
+        if (calledFromDBus())
+            sendErrorReply(QDBusError::Failed, errorMsg);
 
-            qInfo() << errorMsg;
-            resource->deleteLater();
-            return QDBusObjectPath();
-        }
+        qWarning() << qPrintable(errorMsg);
+        return QDBusObjectPath();
     }
 
-    auto conn = resource->connObject(uid);
+    auto conn = resource->getConn(innerAppid, uid);
     if (!conn) {
-        conn = resource->createConn(uid);
+        conn = resource->createConn(innerAppid, uid);
         if (!conn) {
-            QString errorMsg = QString("Can't register Connection object for the acquire. expecting path:%1.").arg(path);
+            QString errorMsg = QString("Can't register Connection object:[%1], for the appid:[%2].").arg(genericResourceKey).arg(appid);
             if (calledFromDBus())
                 sendErrorReply(QDBusError::Failed, errorMsg);
 
-            qInfo() << errorMsg;
+            qWarning() << qPrintable(errorMsg);
             return QDBusObjectPath();
         }
-        qCInfo(cfLog, "created connection:%s", qPrintable(conn->key()));
+        qCInfo(cfLog, "Created connection:%s", qPrintable(conn->path()));
     } else {
-        qCInfo(cfLog, "reuse connection:%s", qPrintable(conn->key()));
+        qCInfo(cfLog, "Reuse connection:%s", qPrintable(conn->path()));
     }
+
+    if (resourceHolder) {
+        m_resources.insert(genericResourceKey, resourceHolder.take());
+        QObject::connect(resource, &DSGConfigResource::releaseConn, this, &DSGConfigServer::onReleaseChanged);
+    }
+
     addConnWatchedService(service);
     m_refManager->refResource(service, conn->key());
 
-    return QDBusObjectPath(conn->key());
+    return QDBusObjectPath(conn->path());
 }
 
 /*!
@@ -180,7 +188,7 @@ void DSGConfigServer::onReleaseChanged(const ConnServiceName &service, const Con
     m_refManager->derefResource(service, connKey);
 
     const auto remainingCount = m_refManager->getRefResourceCountOnTheSR(service, connKey);
-    qCInfo(cfLog, "reduced connection refrence service. service:%s, path:%s, remaining refrence %d", qPrintable(service), qPrintable(connKey), remainingCount);
+    qCInfo(cfLog, "Reduced connection refrence service. service:%s, path:%s, remaining refrence %d", qPrintable(service), qPrintable(connKey), remainingCount);
 }
 
 /*!
@@ -189,20 +197,21 @@ void DSGConfigServer::onReleaseChanged(const ConnServiceName &service, const Con
  */
 void DSGConfigServer::onReleaseResource(const ConnKey &connKey)
 {
-    const ResourceKey resourceKey = getResourceKey(connKey);
-    if (m_resources.contains(resourceKey)) {
-        auto resource = m_resources.value(resourceKey);
-        qCInfo(cfLog, "remove connection:%s", qPrintable(connKey));
-        resource->removeConn(connKey);
-        if (resource->isEmptyConn()) {
-            qCInfo(cfLog, "remove resource:%s", qPrintable(resourceKey));
-            m_resources.remove(resourceKey);
-            resource->save();
-            resource->deleteLater();
+    const GenericResourceKey &resourceKey = getGenericResourceKey(connKey);
+    auto resource = m_resources.value(resourceKey);
+    if (!resource)
+        return;
+    qCInfo(cfLog, "Remove connection:%s", qPrintable(connKey));
+    resource->removeConn(connKey);
 
-            if (m_enableExit) {
-                Q_EMIT tryExit();
-            }
+    if (resource->isEmptyConn()) {
+        qCInfo(cfLog, "Remove resource:%s", qPrintable(resourceKey));
+
+        m_resources.remove(resourceKey);
+        resource->deleteLater();
+
+        if (m_enableExit) {
+            Q_EMIT tryExit();
         }
     }
 }
@@ -210,13 +219,36 @@ void DSGConfigServer::onReleaseResource(const ConnKey &connKey)
 void DSGConfigServer::onTryExit()
 {
     const int count = resourceSize();
-    qCDebug(cfLog()) << "try exit application, resource size:" << count;
+    qCDebug(cfLog, "Try exit application, resource size:%d", count);
 
     if (count <= 0) {
-        qCInfo(cfLog()) << "exit application because of not exist resource.";
+        qCInfo(cfLog()) << "Exit application because of not exist resource.";
         exit();
         qApp->quit();
     }
+}
+
+void DSGConfigServer::doSyncConfigCache(const ConfigSyncBatchRequest &request)
+{
+    const QList<ConfigCacheKey> &keys = request.data;
+    qCInfo(cfLog, "Do sync config cache, keys count:%d", keys.size());
+    for (auto key: keys) {
+        auto resourceKey = getResourceKeyByConfigCache(key);
+        const auto genericResourceKey = getGenericResourceKeyByResourceKey(resourceKey);
+        if (auto resource = m_resources.value(genericResourceKey)) {
+            resource->doSyncConfigCache(key);
+        }
+    }
+}
+
+ResourceKey DSGConfigServer::getResourceKeyByConfigCache(const ConfigCacheKey &key)
+{
+    if (ConfigSyncRequestCache::isUserKey(key)) {
+        return getResourceKey(ConfigSyncRequestCache::getUserKey(key));
+    } else if (ConfigSyncRequestCache::isGlobalKey(key)){
+        return ConfigSyncRequestCache::getGlobalKey(key);
+    }
+    return ResourceKey();
 }
 
 ConfigureId DSGConfigServer::getConfigureIdByPath(const QString &path)
@@ -237,29 +269,6 @@ ConfigureId DSGConfigServer::getConfigureIdByPath(const QString &path)
     return res;
 }
 
-bool DSGConfigServer::filterRequestPath(DSGConfigResource *resource, const ConfigureId &configureInfo) const
-{
-    const QString fileName = validDBusObjectPath(configureInfo.resource);
-    const QString &rfileName = validDBusObjectPath(resource->getName());
-    if (rfileName != fileName)
-        return true;
-
-    if (!configureInfo.appid.isEmpty()) {
-        const QString &appid = validDBusObjectPath(configureInfo.appid);
-        const QString &rappid = validDBusObjectPath(resource->getAppid());
-        if (appid != rappid)
-            return true;
-    }
-
-    return false;
-}
-
-QString DSGConfigServer::validDBusObjectPath(const QString &path)
-{
-    QString tmp = path;
-    return tmp.replace('.', '_').replace('-', '_');
-}
-
 /*!
  \brief 文件刷新，
  当描述文件被修改或override目录新增、移除、修改文件时，需要重新解析对应的文件内容，
@@ -267,11 +276,15 @@ QString DSGConfigServer::validDBusObjectPath(const QString &path)
  */
 void DSGConfigServer::update(const QString &path)
 {
-    qInfo() << "update resource:" << path;
+    qCInfo(cfLog()) << "Update resource:" << path;
 
     const auto &configureInfo = getConfigureIdByPath(path);
+    qCInfo(cfLog, "Update the configuration: appid:[%s], subpath:[%s], configurationid:[%s].",
+           qPrintable(configureInfo.appid),
+           qPrintable(configureInfo.subpath),
+           qPrintable(configureInfo.resource));
     if (configureInfo.isInValid()) {
-        QString errorMsg = QString("it's illegal resource [%1].").arg(path);
+        QString errorMsg = QString("It's illegal resource [%1].").arg(path);
         if (calledFromDBus()) {
             sendErrorReply(QDBusError::Failed, errorMsg);
         }
@@ -279,44 +292,46 @@ void DSGConfigServer::update(const QString &path)
         return;
     }
 
-    qInfo(cfLog()) << QString("update the configuration: appid:[%1], subpath:[%2], configurationid:[%3].").arg(configureInfo.appid).arg(configureInfo.subpath).arg(configureInfo.resource);
-    for (auto resource : m_resources) {
-        if (filterRequestPath(resource, configureInfo))
-            continue;
 
-        const QString &resourceKey = resource->path();
-        qInfo() << QString("updated the object path[%1]").arg(resourceKey);
-        if (!resource->reparse()) {
-            QString errorMsg = QString("reparse the object path[%1] error.").arg(resourceKey);
+    const GenericResourceKey resourceKey = getGenericResourceKey(configureInfo.resource, configureInfo.subpath);
+    if (auto resource = resourceObject(resourceKey)) {
+        qCInfo(cfLog, "Updated the resouce:[%s], for the appid:[%s].",
+               qPrintable(resourceKey),
+               qPrintable(configureInfo.appid));
+        const auto &innerAppid = outerAppidToInner(configureInfo.appid);
+        if (!resource->reparse(innerAppid)) {
+            QString errorMsg = QString("Update the resource path[%1] error.").arg(path);
             if (calledFromDBus()) {
                 sendErrorReply(QDBusError::Failed, errorMsg);
             }
-            qWarning() << errorMsg;
+            qWarning() << qPrintable(errorMsg);
         }
     }
 }
 
 void DSGConfigServer::sync(const QString &path)
 {
-    qInfo() << "sync resource:" << path;
+    qInfo() << "Sync the resource:" << path;
 
     const auto &configureInfo = getConfigureIdByPath(path);
     if (configureInfo.isInValid()) {
-        QString errorMsg = QString("it's illegal resource [%1].").arg(path);
+        QString errorMsg = QString("It's illegal resource [%1].").arg(path);
         if (calledFromDBus()) {
             sendErrorReply(QDBusError::Failed, errorMsg);
         }
-        qWarning() << errorMsg;
+        qWarning() << qPrintable(errorMsg);
         return;
     }
 
-    qInfo(cfLog()) << QString("sync the configuration: appid:[%1], subpath:[%2], configurationid:[%3].").arg(configureInfo.appid).arg(configureInfo.subpath).arg(configureInfo.resource);
-    for (auto resource : m_resources) {
-        if (filterRequestPath(resource, configureInfo))
-            continue;
-
-        qInfo(cfLog()) << QString("sync the object path[%1]").arg(resource->path());
-        resource->save();
+    qCInfo(cfLog, "Sync the configuration: appid:[%s], subpath:[%s], configurationid:[%s].",
+           qPrintable(configureInfo.appid),
+           qPrintable(configureInfo.subpath),
+           qPrintable(configureInfo.resource));
+    const GenericResourceKey resourceKey = getGenericResourceKey(configureInfo.resource, configureInfo.subpath);
+    if (auto resource = resourceObject(resourceKey)) {
+        qCInfo(cfLog, "Sync the resouce:[%s], for the appid:[%s].", qPrintable(resourceKey), qPrintable(configureInfo.appid));
+        const auto &innerAppid = outerAppidToInner(configureInfo.appid);
+        resource->save(innerAppid);
     }
 }
 
@@ -336,13 +351,13 @@ void DSGConfigServer::addConnWatchedService(const ConnServiceName & service)
         m_watcher->setWatchMode(QDBusServiceWatcher::WatchForUnregistration);
         connect(m_watcher, &QDBusServiceWatcher::serviceUnregistered, [this](const QString &service){
 
-            qCInfo(cfLog, "remove watchered service:%s", qPrintable(service));
+            qCInfo(cfLog, "Remove watchered service:%s", qPrintable(service));
             m_watcher->removeWatchedService(service);
             m_refManager->releaseService(service);
         });
     }
     if (!m_watcher->watchedServices().contains(service)) {
-        qCInfo(cfLog, "add watchered service:%s, appid:%s, user:%s.",
+        qCInfo(cfLog, "Add watchered service:%s, application:%s, user:%s.",
                 qPrintable(service),
                 qPrintable(getProcessNameByPid(connection().interface()->servicePid(service).value())),
                 qPrintable(getUserNameByUid(connection().interface()->serviceUid(service).value())));

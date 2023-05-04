@@ -4,6 +4,7 @@
 
 #include "dconfigrefmanager.h"
 #include <QDebug>
+#include <QEvent>
 
 // 管理服务
 class ServiceRef {
@@ -116,6 +117,7 @@ RefManager::~RefManager()
  */
 void RefManager::destroy()
 {
+    m_timerPool.clear();
     qDeleteAll(services);
     services.clear();
     qDeleteAll(resources);
@@ -194,18 +196,17 @@ void RefManager::setDelayReleaseTime(const int ms)
 
     const int TimeOut = 1; // min
     if (ms > (TimeOut * 1000 * 60)) {
-        qCWarning(cfLog()) << "It maybe consume resources too much when delayReleaseTime too long"
-                           <<", recommand less " << TimeOut  << " min.";
+        qCWarning(cfLog, "It maybe consume resources too much when delayReleaseTime too long , recommand less %d min.", TimeOut);
     }
 
     for (auto timer : m_delayReleaseingConns.values()) {
         // Recalculate remainingTime, to stop the timer when remainingTime less 0.
         int newRemainingTime = ms - timer->remainingTime();
         if (newRemainingTime > 0) {
-            qCDebug(cfLog()) << "Reduce remaining time " << newRemainingTime << " ms";
+            qCDebug(cfLog, "Reduce remaining time %d ms.", newRemainingTime);
             timer->start(newRemainingTime);
         } else {
-            qCDebug(cfLog()) << "Stop Early " << std::abs(newRemainingTime) << " ms";
+            qCDebug(cfLog, "Stop Early %d ms.", std::abs(newRemainingTime));
             timer->stop();
         }
     }
@@ -398,16 +399,137 @@ void RefManager::delayDeleteResource(const QList<ResourceRef *> &deleteResources
         } else {
             timer = m_timerPool.pull();
             QObject::disconnect(timer, &QTimer::timeout, nullptr, nullptr);
-            QObject::connect(timer, &QTimer::timeout, this, [this, resourceRef, timer](){
+            QObject::connect(timer, &QTimer::timeout, this, [this, resource, timer](){
                 m_timerPool.push(timer);
-                m_delayReleaseingConns.remove(resourceRef->resource);
-                if (resourceRef->release()) {
-                    qDebug() << QString("resource[%1] removing.").arg(resourceRef->resource);
+                m_delayReleaseingConns.remove(resource);
+                auto resourceRef = resources.value(resource);
+                if (resourceRef && resourceRef->release()) {
+                    qCDebug(cfLog, "Resource[%s] removing.", qPrintable(resourceRef->resource));
                     doDeleteResource({resourceRef});
                 }
             });
             m_delayReleaseingConns.insert(resource, timer);
         }
         timer->start(m_delayReleaseTime);
+    }
+}
+
+ConfigSyncRequestCache::ConfigSyncRequestCache(QObject *parent)
+    : QObject (parent)
+    , m_syncTimer(new QBasicTimer())
+    , m_delaySyncTime(3000)
+    , m_batchCount(20)
+{
+}
+
+ConfigSyncRequestCache::~ConfigSyncRequestCache()
+{
+    clear();
+
+    delete m_syncTimer;
+    m_syncTimer = nullptr;
+}
+
+void ConfigSyncRequestCache::pushRequest(const ConfigCacheKey &key)
+{
+    if (m_configCacheKeys.contains(key))
+        return;
+
+    qCDebug(cfLog()) << "Push syncConfigRequest key:" << key;
+    m_configCacheKeys.insert(key);
+    if (!m_syncTimer->isActive()) {
+        m_syncTimer->start(m_delaySyncTime, this);
+    }
+}
+
+void ConfigSyncRequestCache::clear()
+{
+    m_configCacheKeys.clear();
+
+    if (m_syncTimer->isActive())
+        m_syncTimer->stop();
+}
+
+static const QString ConfigSyncRequestCacheGlobalPrefix("g-");
+static const QString ConfigSyncRequestCacheUserPrefix("u-");
+ConfigCacheKey ConfigSyncRequestCache::globalKey(const ResourceKey &key)
+{
+    return QString("%1%2").arg(ConfigSyncRequestCacheGlobalPrefix).arg(key);
+}
+
+ConfigCacheKey ConfigSyncRequestCache::userKey(const ConnKey &key)
+{
+    return QString("%1%2").arg(ConfigSyncRequestCacheUserPrefix).arg(key);
+}
+
+bool ConfigSyncRequestCache::isGlobalKey(const ConfigCacheKey &key)
+{
+    return key.startsWith(ConfigSyncRequestCacheGlobalPrefix);
+}
+
+bool ConfigSyncRequestCache::isUserKey(const ConfigCacheKey &key)
+{
+    return key.startsWith(ConfigSyncRequestCacheUserPrefix);
+}
+
+ResourceKey ConfigSyncRequestCache::getGlobalKey(const ConfigCacheKey &key)
+{
+    return key.mid(ConfigSyncRequestCacheGlobalPrefix.size());
+}
+
+ConnKey ConfigSyncRequestCache::getUserKey(const ConfigCacheKey &key)
+{
+    return key.mid(ConfigSyncRequestCacheUserPrefix.size());
+}
+
+int ConfigSyncRequestCache::requestsCount() const
+{
+    return m_configCacheKeys.count();
+}
+
+int ConfigSyncRequestCache::delaySyncTime() const
+{
+    return m_delaySyncTime;
+}
+
+void ConfigSyncRequestCache::setDelaySyncTime(const int time)
+{
+    m_delaySyncTime = time;
+}
+
+int ConfigSyncRequestCache::batchCount() const
+{
+    return m_batchCount;
+}
+
+void ConfigSyncRequestCache::setBatchCount(const int count)
+{
+    m_batchCount = count;
+}
+
+void ConfigSyncRequestCache::timerEvent(QTimerEvent *event)
+{
+    if (event->timerId() == m_syncTimer->timerId()) {
+        customRequest();
+
+        if (m_configCacheKeys.isEmpty())
+            m_syncTimer->stop();
+    }
+
+    return QObject::timerEvent(event);
+}
+
+void ConfigSyncRequestCache::customRequest()
+{
+    if (!m_configCacheKeys.isEmpty()) {
+        ConfigSyncBatchRequest request;
+        int i = 0;
+        for (auto iter = m_configCacheKeys.begin(); iter != m_configCacheKeys.end() && i < m_batchCount; i++) {
+            request.data << *iter;
+            iter = m_configCacheKeys.erase(iter);
+        }
+        qCDebug(cfLog, "Start sync config cache, syncConfigRequest count:%d, elapsed count:%d",
+                request.data.count(), m_configCacheKeys.count());
+        Q_EMIT syncConfigRequest(request);
     }
 }

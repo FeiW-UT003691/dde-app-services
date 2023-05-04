@@ -10,6 +10,11 @@
 
 #include <csignal>
 
+static void exitApp(int signal)
+{
+    Q_UNUSED(signal);
+    QCoreApplication::exit();
+}
 int main(int argc, char *argv[])
 {
     QCoreApplication a(argc, argv);
@@ -44,27 +49,26 @@ int main(int argc, char *argv[])
     }
 
     if (dsgConfig.registerService()) {
-        qInfo() << "start dconfig daemon successfully.";
+        qInfo() << "Starting dconfig daemon succeeded.";
     } else {
-        qInfo() << "start dconfig daemon failed.";
+        qInfo() << "Starting dconfig daemon failed.";
         return 1;
     }
 
     // Initialization of DtkCore needs to be later than `registerService` avoid earlier request itself.
     Dtk::Core::DLogManager::registerConsoleAppender();
-    Dtk::Core::DLogManager::setlogFilePath(QString("/var/log/%1/%2/%2.log").arg(a.organizationName(), a.applicationName()));
-    const QDir &logDir = QFileInfo((Dtk::Core::DLogManager::getlogFilePath())).dir();
-    if (!logDir.exists())
-        QDir().mkpath(logDir.path());
-
     Dtk::Core::DLogManager::registerFileAppender();
     qInfo() << "Log path is:" << Dtk::Core::DLogManager::getlogFilePath();
+    QObject::connect(qApp, &QCoreApplication::aboutToQuit, [&dsgConfig]() {
+        qInfo() << "Exit dconfig daemon and release resources.";
+        dsgConfig.exit();
+    });
 
     // 异常处理，调用QCoreApplication::exit，使DSGConfigServer正常析构。
-    std::signal(SIGINT, &QCoreApplication::exit);
-    std::signal(SIGABRT, &QCoreApplication::exit);
-    std::signal(SIGTERM, &QCoreApplication::exit);
-    std::signal(SIGKILL, &QCoreApplication::exit) ;
+    std::signal(SIGINT, exitApp);
+    std::signal(SIGABRT, exitApp);
+    std::signal(SIGTERM, exitApp);
+    std::signal(SIGKILL, exitApp);
 
     return a.exec();
 }

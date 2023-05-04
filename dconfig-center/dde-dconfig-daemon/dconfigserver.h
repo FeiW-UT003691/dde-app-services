@@ -12,6 +12,8 @@
 
 class DSGConfigResource;
 class RefManager;
+class ConfigSyncBatchRequest;
+class ConfigSyncRequestCache;
 /**
  * @brief The DSGConfigServer class
  * 管理配置策略服务
@@ -29,15 +31,13 @@ public:
 
     bool registerService();
 
-    DSGConfigResource* resourceObject(const ResourceKey &key);
+    DSGConfigResource* resourceObject(const GenericResourceKey &key) const;
 
     void setLocalPrefix(const QString &localPrefix);
 
     void setEnableExit(const bool enable);
 
     int resourceSize() const;
-
-    static QString validDBusObjectPath(const QString &path);
 
 Q_SIGNALS:
     void releaseResource(const ConnKey& resource);
@@ -63,21 +63,22 @@ private Q_SLOTS:
 
     void onTryExit();
 
+    void doSyncConfigCache(const ConfigSyncBatchRequest &request);
+
 private:
+    ResourceKey getResourceKeyByConfigCache(const ConfigCacheKey &key);
 
     ConfigureId getConfigureIdByPath(const QString &path);
-
-    bool filterRequestPath(DSGConfigResource *resource, const ConfigureId &configureInfo) const;
-
 private:
 
     // 所有链接，一个资源对应一个链接
-    QMap<ResourceKey, DSGConfigResource*> m_resources;
+    QMap<GenericResourceKey, DSGConfigResource *> m_resources;
 
-    QDBusServiceWatcher* m_watcher;
+    QDBusServiceWatcher *m_watcher = nullptr;
 
-    RefManager* m_refManager;
+    RefManager *m_refManager = nullptr;
 
     QString m_localPrefix;
     bool m_enableExit = false;
+    ConfigSyncRequestCache *m_syncRequestCache = nullptr;
 };

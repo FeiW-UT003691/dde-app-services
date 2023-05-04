@@ -5,8 +5,9 @@
 PROJECT(dde-dconfig-editor)
 CMAKE_MINIMUM_REQUIRED(VERSION 2.6)
 
-set(DVERSION "1.0.0" CACHE STRING "define project version")
-add_definitions(-DVERSION="${DVERSION}")
+if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
+    set(CMAKE_INSTALL_PREFIX /usr)
+endif ()
 
 set(REQUIRED_QT_VERSION 5.11.3)
 find_package(Qt5 ${REQUIRED_QT_VERSION} REQUIRED COMPONENTS Core Gui Widgets DBus)
@@ -18,10 +19,6 @@ find_package(DtkWidget REQUIRED)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(AUTOMOC_COMPILER_PREDEFINES ON)
-
-if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
-    set(CMAKE_INSTALL_PREFIX /usr)
-endif ()
 
 set(DCONFIG_DBUS_XML_CONFIGMANAGER ../dde-dconfig-daemon/services/org.desktopspec.ConfigManager.xml)
 set_source_files_properties(${DCONFIG_DBUS_XML_CONFIGMANAGER} PROPERTIES CLASSNAME DSGConfig NO_NAMESPACE NO_NAMESPACE)

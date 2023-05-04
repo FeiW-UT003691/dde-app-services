@@ -8,7 +8,7 @@ Build-Depends:
  cmake,
  qtbase5-dev,
  libdtkcommon-dev,
- libdtkcore-dev,
+ libdtkcore-dev(>5.6.8),
  libdtkgui-dev,
  libdtkwidget-dev,
  libgtest-dev
@@ -32,5 +32,5 @@ Depends:
  ${shlibs:Depends},
  ${misc:Depends}
 Description: deepin desktop-environment - dde-dconfig-editor module
- dde-dconfig-editor is a GUI or Console tool, it's used to view and edit 
+ dde-dconfig-editor is a GUI or Console tool, it's used to view and edit
  DSG configuration for current user.

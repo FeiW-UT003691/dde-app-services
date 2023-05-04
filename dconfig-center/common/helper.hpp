@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021 - 2022 Uniontech Software Technology Co.,Ltd.
+// SPDX-FileCopyrightText: 2021 - 2023 Uniontech Software Technology Co.,Ltd.
 //
 // SPDX-License-Identifier: LGPL-3.0-or-later
 
@@ -12,13 +12,11 @@
 #include <QDBusArgument>
 #include <QJsonDocument>
 
-#include <DStandardPaths>
-
 using ResourceId = QString;
 using AppId = QString;
 using SubpathKey = QString;
 using ResourceList = QList<ResourceId>;
-using AppList = QSet<AppId>;
+using AppList = QList<AppId>;
 using SubpathList = QList<SubpathKey>;
 
 static const QString &SUFFIX = QString(".json");
@@ -29,6 +27,8 @@ constexpr int SubpathRole = Qt::UserRole + 13;
 constexpr int KeyRole = Qt::UserRole + 14;
 constexpr int ValueRole = Qt::UserRole + 15;
 constexpr int DescriptionRole = Qt::UserRole + 16;
+static const QString NoAppId;
+static const QString VirtualAppName("virtual-generic-applicaiton");
 
 enum ConfigType {
     InvalidType = 0x00,
@@ -41,9 +41,7 @@ enum ConfigType {
 };
 
 #ifdef DSG_DATA_DIR
-#define D_GET_NAMESPACE_STR_IMPL(M) #M
-#define D_GET_NAMESPACE_STR(M) D_GET_NAMESPACE_STR_IMPL(M)
-const QString MetaFileInstalledDir = QString("%1/configs").arg(D_GET_NAMESPACE_STR(DSG_DATA_DIR));
+const QString MetaFileInstalledDir = QString("%1/configs").arg(DSG_DATA_DIR);
 #else
 const QString MetaFileInstalledDir = QString("/usr/share/dsg/configs");
 #endif
@@ -59,6 +57,8 @@ static QString resourcePath(const QString &appid, const QString &localPrefix = Q
 static AppList applications(const QString &localPrefix = QString())
 {
     AppList result;
+    result << NoAppId;
+
     result.reserve(50);
 
     // TODO calling service interface to get app list,
@@ -73,7 +73,7 @@ static AppList applications(const QString &localPrefix = QString())
             if (filterDirs.contains(appid))
                 continue;
 
-            result.insert(appid);
+            result.append(appid);
         }
     }
     return result;
@@ -107,7 +107,6 @@ static ResourceList resourcesForApp(const QString &appid, const QString &localPr
 
 static ResourceList resourcesForAllApp(const QString &localPrefix = QString())
 {
-    DCORE_USE_NAMESPACE;
     QDir resourceDir(QString("%1/%2").arg(localPrefix, MetaFileInstalledDir));
     QDirIterator iterator(resourceDir);
     QSet<ResourceId> result;
